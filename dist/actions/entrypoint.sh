@@ -1,7 +1,8 @@
 #!/bin/bash
 # This is an entrypoint for our Docker image that does some minimal bootstrapping before executing.
 
-set -e
+# set -e
+set -exuo
 
 # If the PULUMI_CI variable is set, we'll do some extra things to make common tasks easier.
 if [ ! -z "$PULUMI_CI" ]; then
@@ -10,7 +11,7 @@ if [ ! -z "$PULUMI_CI" ]; then
 
     # If the root of the Pulumi project isn't the root of the repo, CD into it.
     if [ ! -z "$PULUMI_ROOT" ]; then
-        cd $PULUMI_ROOT
+       cd $PULUMI_ROOT
     fi
 
     # Detect the CI system and configure variables so that we get good Pulumi workflow and GitHub App support.
@@ -44,6 +45,7 @@ if [ ! -z "$PULUMI_CI" ]; then
     # Respect the branch mappings file for stack selection. Note that this is *not* required, but if the file
     # is missing, the caller of this script will need to pass `-s <stack-name>` to specify the stack explicitly.
     if [ ! -z "$BRANCH" ]; then
+        
         if [ -e $ROOT/.pulumi/ci.json ]; then
             PULUMI_STACK_NAME=$(cat $ROOT/.pulumi/ci.json | jq -r ".\"$BRANCH\"")
         else
@@ -70,13 +72,6 @@ if [ ! -z "$PULUMI_CI" ]; then
     fi
 fi
 
-# For Google, we need to authenticate with a service principal for certain authentication operations.
-if [ ! -z "$GOOGLE_CREDENTIALS" ]; then
-    GCLOUD_KEYFILE="$(mktemp).json"
-    echo "$GOOGLE_CREDENTIALS" > $GCLOUD_KEYFILE
-    gcloud auth activate-service-account --key-file=$GCLOUD_KEYFILE
-fi
-
 # Next, lazily install packages if required.
 if [ -e package.json ] && [ ! -d node_modules ]; then
     npm install
@@ -86,18 +81,28 @@ fi
 # later use. Note that we exit immediately on failure (under set -e), so we `tee` stdout, but
 # allow errors to be surfaced in the Actions log.
 PULUMI_COMMAND="pulumi $*"
+PULUMI_SET_REGION="pulumi config set aws:region ${AWS_REGION:-us-east-1}"
 OUTPUT_FILE=$(mktemp)
-echo "#### :tropical_drink: \`$PULUMI_COMMAND\`"
+echo "\`$PULUMI_COMMAND\`"
+echo "\`$PULUMI_SET_REGION\`"
+echo "\`$GITHUB_WORKSPACE/${PULUMI_ROOT:-public}\`"
+bash -c "$PULUMI_SET_REGION"
 bash -c "$PULUMI_COMMAND" | tee $OUTPUT_FILE
 EXIT_CODE=${PIPESTATUS[0]}
 
-# If the GitHub action stems from a Pull Request event, we may optionally leave a comment if the
-# COMMENT_ON_PR is set.
-COMMENTS_URL=$(cat $GITHUB_EVENT_PATH | jq -r .pull_request.comments_url)
-if [ ! -z $COMMENTS_URL ] && [ ! -z $COMMENT_ON_PR ]; then
-    if [ -z $GITHUB_TOKEN ]; then
-        echo "ERROR: COMMENT_ON_PR was set, but GITHUB_TOKEN is not set."
-    else
+# Detect what action is being taken. If it's a PR that's been edited, we will preview the changes;
+# if it's a "close" or branch deletion, we will delete the stack; otherwise, we exit cleanly because
+# there's nothing to do.
+case "$GITHUB_EVENT_NAME" in
+    "pull_request")
+        # Extract PR attributes.
+        # If the GitHub action stems from a Pull Request event, we may optionally leave a comment if the
+        # COMMENT_ON_PR is set.
+        GH_PR_ACTION=$(cat "$GITHUB_EVENT_PATH" | jq -r ".action")
+        GH_PR_NUMBER=$(cat "$GITHUB_EVENT_PATH" | jq -r ".number")
+        COMMENTS_URL=$(cat $GITHUB_EVENT_PATH | jq -r .pull_request.comments_url)
+        GH_BRANCH=$(cat "$GITHUB_EVENT_PATH" | jq -r ".pull_request.head.ref")
+        echo "# PR #$GH_PR_NUMBER, action '$GH_PR_ACTION', branch $GH_BRANCH"
         COMMENT="#### :tropical_drink: \`$PULUMI_COMMAND\`
 \`\`\`
 $(cat $OUTPUT_FILE)
@@ -105,7 +110,17 @@ $(cat $OUTPUT_FILE)
         PAYLOAD=$(echo '{}' | jq --arg body "$COMMENT" '.body = $body')
         echo "Commenting on PR $COMMENTS_URL"
         curl -s -S -H "Authorization: token $GITHUB_TOKEN" -H "Content-Type: application/json" --data "$PAYLOAD" "$COMMENTS_URL"
-    fi
-fi
+        ;;
+    "delete")
+        # Extract deletion attributes.
+        GH_BRANCH=$(cat "$GITHUB_EVENT_PATH" | jq -r ".ref")
+        echo "# Branch deletion for $GH_BRANCH"
+        # For branch deletions, always delete the branch.
+        PULUMI_UPDATE=false
+        ;;
+    "push")
+        echo "Do something on push"
+        ;;
+esac
 
 exit $EXIT_CODE
