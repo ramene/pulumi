@@ -2,7 +2,7 @@
 # This is an entrypoint for our Docker image that does some minimal bootstrapping before executing.
 
 # set -e
-set -exuo
+set -e
 
 # If the PULUMI_CI variable is set, we'll do some extra things to make common tasks easier.
 if [ ! -z "$PULUMI_CI" ]; then
@@ -93,11 +93,10 @@ EXIT_CODE=${PIPESTATUS[0]}
 # Detect what action is being taken. If it's a PR that's been edited, we will preview the changes;
 # if it's a "close" or branch deletion, we will delete the stack; otherwise, we exit cleanly because
 # there's nothing to do.
+
 case "$GITHUB_EVENT_NAME" in
     "pull_request")
         # Extract PR attributes.
-        # If the GitHub action stems from a Pull Request event, we may optionally leave a comment if the
-        # COMMENT_ON_PR is set.
         GH_PR_ACTION=$(cat "$GITHUB_EVENT_PATH" | jq -r ".action")
         GH_PR_NUMBER=$(cat "$GITHUB_EVENT_PATH" | jq -r ".number")
         COMMENTS_URL=$(cat $GITHUB_EVENT_PATH | jq -r .pull_request.comments_url)
@@ -114,12 +113,14 @@ $(cat $OUTPUT_FILE)
     "delete")
         # Extract deletion attributes.
         GH_BRANCH=$(cat "$GITHUB_EVENT_PATH" | jq -r ".ref")
-        echo "# Branch deletion for $GH_BRANCH"
         # For branch deletions, always delete the branch.
         PULUMI_UPDATE=false
         ;;
     "push")
-        echo "Do something on push"
+        # Extract deletion attributes.
+        GH_BRANCH=$(cat "$GITHUB_EVENT_PATH" | jq -r ".ref")
+        # For branch deletions, always delete the branch.
+        PULUMI_UPDATE=false
         ;;
 esac
 
